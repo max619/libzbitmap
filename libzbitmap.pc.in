@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: zbitmap
+Description: LZBITMAP compression library
+Version: @LZBITMAP_VERSION@
+Libs: -L${libdir} -lzbitmap
+Cflags: -I${includedir}
