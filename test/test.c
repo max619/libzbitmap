@@ -1,8 +1,15 @@
+#ifndef _WIN32
+    #include <pthread.h>
+#else
+    #include <sys/types.h>
+    #include <Windows.h>
+#endif
+
 #include <errno.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "libzbitmap.h"
 
 static void fatal_with_loc(const char *fn, int line, int test)
@@ -10,10 +17,10 @@ static void fatal_with_loc(const char *fn, int line, int test)
     fprintf(stderr, "Fatal error in test %.3u (function %s(), line %d)\n", test, fn, line);
     exit(1);
 }
-#define FATAL(test)  fatal_with_loc(__func__, __LINE__, test)
+#define FATAL(test) fatal_with_loc(__func__, __LINE__, test)
 
-#define ORIGINAL    0
-#define COMPRESSED  1
+#define ORIGINAL 0
+#define COMPRESSED 1
 
 static int tests_run, tests_failed;
 
@@ -29,17 +36,17 @@ static void report_results(void)
     exit(tests_failed != 0);
 }
 
-static char *read_file(int i, int which, size_t *len)
+static uint8_t *read_file(int i, int which, size_t *len)
 {
     char name[24];
     FILE *file = NULL;
-    char *buf = NULL;
+    uint8_t *buf = NULL;
     size_t length;
 
     if(i > 999)
         FATAL(i);
     snprintf(name, 24, "files/%.3u-%s", i, which == ORIGINAL ? "original" : "compressed");
-    file = fopen(name, "r");
+    file = fopen(name, "rb");
     if(!file) {
         if(errno == ENOENT) /* No more tests */
             report_results();
@@ -68,9 +75,9 @@ static char *read_file(int i, int which, size_t *len)
 
 static void run_decompress_test(int i)
 {
-    char *original = NULL;
-    char *compressed = NULL;
-    char *decompressed = NULL;
+    uint8_t *original = NULL;
+    uint8_t *compressed = NULL;
+    uint8_t *decompressed = NULL;
     size_t orig_len, compr_len, decmp_len, exp_decmp_len;
     int err;
 
@@ -117,7 +124,7 @@ static void save_compression(const char *buf, size_t size, int i)
     if(i > 999)
         FATAL(i);
     snprintf(name, 24, "files/%.3u-%s", i, "recompressed");
-    file = fopen(name, "w");
+    file = fopen(name, "wb");
     if(!file)
         FATAL(i);
 
@@ -129,12 +136,12 @@ static void save_compression(const char *buf, size_t size, int i)
 }
 
 struct arguments {
-    char        dest[ZBM_MAX_CHUNK_SIZE];
-    const void  *src;
-    size_t      src_size;
-    off_t       index;
-    size_t      out_len;
-    int         err;
+    char dest[ZBM_MAX_CHUNK_SIZE];
+    const void *src;
+    size_t src_size;
+    off_t index;
+    size_t out_len;
+    zbm_error_t err;
 };
 
 static void *compress_chunk(void *arguments)
@@ -147,12 +154,49 @@ static void *compress_chunk(void *arguments)
 
 #define NUM_THREADS 32
 
-static int compress(void *dest, size_t dest_size, const void *src, size_t src_size, size_t *out_len, int testnum)
+#ifdef _WIN32
+typedef HANDLE thread_t;
+
+static int thread_create(thread_t *t, void *(*fn)(void *), void *arg)
+{
+    DWORD tid;
+    HANDLE h = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, arg, 0, &tid);
+    if(!h)
+        return -1;
+    *t = h;
+    return 0;
+}
+
+static int thread_join(thread_t t)
+{
+    if(WaitForSingleObject(t, INFINITE) != WAIT_OBJECT_0)
+        return -1;
+    CloseHandle(t);
+    return 0;
+}
+
+#else
+
+typedef pthread_t thread_t;
+
+static int thread_create(thread_t *t, void *(*fn)(void *), void *arg)
+{
+    return pthread_create(t, NULL, fn, arg);
+}
+
+static int thread_join(thread_t t)
+{
+    return pthread_join(t, NULL);
+}
+
+#endif
+
+static int compress(uint8_t *dest, size_t dest_size, const void *src, size_t src_size, size_t *out_len, int testnum)
 {
     static struct arguments args[NUM_THREADS] = {0};
-    pthread_t threads[NUM_THREADS];
+    thread_t threads[NUM_THREADS];
     off_t i, j, k;
-    int last_error = 0;
+    zbm_error_t last_error = 0;
 
     *out_len = 0;
 
@@ -160,14 +204,14 @@ static int compress(void *dest, size_t dest_size, const void *src, size_t src_si
         args[i].src = src;
         args[i].src_size = src_size;
         args[i].index = i;
-        if(pthread_create(&threads[i], NULL, compress_chunk, &args[i]))
+        if(thread_create(&threads[i], compress_chunk, &args[i]))
             FATAL(testnum);
     }
 
     j = 0;
-    for(j = 1; ; ++j) {
+    for(j = 1;; ++j) {
         for(i = 0; i < NUM_THREADS; ++i) {
-            if(pthread_join(threads[i], NULL))
+            if(thread_join(threads[i]))
                 FATAL(testnum);
             if(args[i].err)
                 last_error = args[i].err;
@@ -186,7 +230,7 @@ static int compress(void *dest, size_t dest_size, const void *src, size_t src_si
             args[i].index = NUM_THREADS * j + i;
             if(args[i].index < j)
                 FATAL(testnum);
-            if(pthread_create(&threads[i], NULL, compress_chunk, &args[i]))
+            if(thread_create(&threads[i], compress_chunk, &args[i]))
                 FATAL(testnum);
         }
     }
@@ -195,7 +239,7 @@ done:
     for(k = 0; k < NUM_THREADS; ++k) {
         if(k == i) /* This one thread has been joined already */
             continue;
-        if(pthread_join(threads[k], NULL))
+        if(thread_join(threads[k]))
             FATAL(testnum);
     }
     return last_error;
@@ -203,9 +247,9 @@ done:
 
 static void run_compress_test(int i)
 {
-    char *original = NULL;
-    char *compressed = NULL;
-    char *decompressed = NULL;
+    uint8_t *original = NULL;
+    uint8_t *compressed = NULL;
+    uint8_t *decompressed = NULL;
     size_t orig_len, compr_len, max_compr_len, decmp_len;
     int err;
 
